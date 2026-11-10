@@ -1,0 +1,106 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mstodo-mcp",
+
+  // Copy this file to `wrangler.jsonc` and fill in the account-specific values
+  // below. The real `wrangler.jsonc` is gitignored (it holds your account_id and
+  // KV namespace IDs). The test pool (vitest.config.ts) reads THIS example so
+  // `npm test` works on a fresh clone without secrets.
+  "main": "src/hosts/cloudflare/worker.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Create your own namespaces and paste their IDs here (v4 syntax — no colon):
+  //   wrangler kv namespace create OAUTH_KV
+  //   wrangler kv namespace create TODO_CACHE
+  // The BINDING names must stay OAUTH_KV (workers-oauth-provider expects it) and
+  // TODO_CACHE (this project's code references it).
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV" },
+    { "binding": "TODO_CACHE" }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      // Per-session MCP agent (legacy binding name TODO_INDEX).
+      { "name": "TODO_INDEX", "class_name": "MSToDoMCP" },
+      // Singleton cross-list index DO (idFromName("owner")) — the single source
+      // of truth for tasks/roster/delta state.
+      { "name": "TODO_INDEX_DO", "class_name": "TodoIndex" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MSToDoMCP"] },
+    { "tag": "v2", "new_sqlite_classes": ["TodoIndex"] }
+  ],
+
+  // Heartbeat cron — Worker scheduled() re-arms the TodoIndex DO alarm if idle.
+  // The DO alarm itself re-arms on DELTA_SYNC_INTERVAL_MIN.
+  "triggers": { "crons": ["*/15 * * * *"] },
+
+  "vars": {
+    "TIMEZONE": "America/Sao_Paulo",
+    "DELTA_SYNC_INTERVAL_MIN": "15",
+    "LIST_METADATA_SOFT_TTL_SEC": "900",
+    // Public origin of THIS deployed Worker, used to build web upload links
+    // (create_upload_link). Set to your workers.dev URL or custom domain to
+    // enable web uploads — links are capability tokens stored in KV, no secret
+    // required. Left at the placeholder, uploads stay disabled.
+    "SERVICE_BASE_URL": "https://mstodo-mcp.dalmasont.workers.dev",
+    // Opt-in Microsoft To Do "My Day" support via the undocumented Substrate
+    // endpoint. Requires the Office 365 Exchange Online `Tasks.ReadWrite`
+    // delegated permission on the Entra app (see DEPLOYMENT.md) and a fresh
+    // /authorize after flipping to "true". When omitting an explicit date, the
+    // My Day tools compute "today" in TIMEZONE above (not UTC). Left "false",
+    // the three My Day tools return my_day_disabled.
+    "ENABLE_MY_DAY": "false",
+    // Cross-server attachment download (mint_download_link + the public /download
+    // endpoint). ON by default; set to "false" to disable both and shrink the
+    // attack surface for deployments that don't need the server-to-server pull.
+    "ENABLE_DOWNLOAD_LINKS": "true",
+    // Graph change-notification subscriptions (ROADMAP §4): a public /webhook
+    // receiver + per-list subscribe/renew for ~2-min updates instead of waiting
+    // for the next delta cycle. ON by default; set "false" to stay timer-only
+    // (no public webhook surface, no per-tenant subscription budget use). Rides
+    // the existing delegated Tasks.ReadWrite scope (no new consent); needs a
+    // reachable https SERVICE_BASE_URL. Delta polling remains the backstop.
+    "ENABLE_TASK_SUBSCRIPTIONS": "true",
+    // Max subscription create/renew/delete Graph ops per sync cycle (mirrors the
+    // My Day scan caps). FREE PLAN: leave at "2" — the calm-cycle subrequest
+    // envelope (delta + My Day scan + subscription ops) must stay under 50. PAID
+    // PLAN: raise it (up to your list count) for faster initial coverage and
+    // renewal headroom. Steady state is ~0 ops, so this only bounds the ramp.
+    "MAX_SUBSCRIPTION_OPS_PER_CYCLE": "2",
+    // Background My Day Substrate scan window: the scan runs at most once per
+    // (MY_DAY_SCAN_EVERY_N_CYCLES × DELTA_SYNC_INTERVAL_MIN) minutes. Substrate
+    // has no delta, so the scan is a full per-folder enumeration — keep this >1
+    // to avoid doubling per-cycle requests. Default 4 ≈ hourly at the 15-min
+    // base. Tune UP if usage is low; DOWN for fresher off-device My Day membership.
+    "MY_DAY_SCAN_EVERY_N_CYCLES": "4",
+    // Max lists the background My Day scan touches per cycle — one Substrate GET
+    // each, oldest-first, rotating across cycles. WHY IT MATTERS: Cloudflare's
+    // free tier caps a Worker at 50 subrequests/request and delta sync already
+    // uses up to ~41, so the scan must stay small or a cycle would blow the
+    // ceiling. At the default 6 (and running only on calm cycles) you stay safely
+    // under 50 no matter how many lists you have — a big roster is just covered a
+    // few lists at a time over several cycles.
+    //   FREE PLAN: leave this at "6".
+    //   PAID PLAN (1000-subrequest ceiling): raise it — up to your list count —
+    //   to refresh the whole roster every cycle for fresher off-device My Day.
+    "MY_DAY_SCAN_MAX_FOLDERS_PER_CYCLE": "6",
+    // Checklist-item cache (ROADMAP): mirrors task checklist items into a
+    // queryable SQLite table so checklist text/state is filterable across tasks
+    // (query_tasks has_open_checklist_item / search_checklist_items / the
+    // oldest-pending follow-up view). OPT-IN — defaults OFF; only "true" enables
+    // it (a one-time per-task Graph backfill). Independent of subscriptions: the
+    // change signal is $delta, so the cache stays fresh on the timer.
+    "ENABLE_CHECKLIST_CACHE": "false",
+    // Max tasks whose checklist is (re)fetched per calm cycle — one Graph GET
+    // each, newest-changed first, draining the NULL-marker backlog over cycles.
+    //   FREE PLAN: leave at "8" (stays under the 50-subrequest ceiling alongside
+    //   delta + the other scans). PAID PLAN: raise it for faster backfill.
+    "CHECKLIST_SCAN_MAX_TASKS_PER_CYCLE": "8"
+  },
+
+  "observability": { "enabled": true }
+}
