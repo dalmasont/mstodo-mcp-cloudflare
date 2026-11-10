@@ -16,7 +16,7 @@ RESUME.md
 # Real wrangler config holds account_id + KV namespace IDs (account-specific).
 # Copy wrangler.example.jsonc -> wrangler.jsonc and fill it in. Tests read the
 # example; deploys read the real (gitignored) file.
-wrangler.jsonc
+
 
 # Local snapshots of live KV config (real Autotask URL, real list IDs). The
 # sanitized templates in config-examples/ ARE committed; these real dumps aren't.
