@@ -489,6 +489,7 @@ const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   set_list_alias: { title: "Set list alias", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   resync: { title: "Resync", readOnlyHint: false, destructiveHint: false },
   add_to_my_day: { title: "Add to My Day", readOnlyHint: false, destructiveHint: false },
+  set_task_times: { title: "Set task start/due time (diagnostic)", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   remove_from_my_day: { title: "Remove from My Day", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   reorder_task: { title: "Reorder task", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   reorder_checklist_item: { title: "Reorder checklist item", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
@@ -1225,6 +1226,98 @@ class ToDoTools implements TokenProvider {
           }
         }),
     );
+
+    // DIAGNOSTIC — which write path does To Do keep a TIME of day on? A plain
+    // Graph PATCH in UTC keeps only the date, so this tries a named zone through
+    // Graph (Windows or IANA name) and the app's own Substrate endpoint.
+    this.#tool(
+      "set_task_times",
+      {
+        description:
+          "DIAGNOSTIC. Write a task's start and due TIME of day through one of three write paths and return what came back, to find the path To Do actually keeps. `mode`: 'graph_windows' = Graph PATCH with a Windows zone name; 'graph_iana' = Graph PATCH with an IANA zone name; 'substrate' = the To Do web app's undocumented Substrate endpoint (needs ENABLE_MY_DAY). `start` and `due` are local wall times 'YYYY-MM-DDTHH:MM' in the owner's zone. `zone` overrides the zone name sent.",
+        inputSchema: {
+          list: z.string().min(1).describe("Owning list (alias, display name, or Graph list ID)."),
+          task_id: z.string().min(1).describe("Microsoft Graph task id."),
+          start: z
+            .string()
+            .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)
+            .optional()
+            .describe("Local start, 'YYYY-MM-DDTHH:MM'."),
+          due: z
+            .string()
+            .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)
+            .optional()
+            .describe("Local end/due, 'YYYY-MM-DDTHH:MM'."),
+          mode: z.enum(["graph_windows", "graph_iana", "substrate"]).describe("Write path to test."),
+          zone: z
+            .string()
+            .optional()
+            .describe(
+              "Zone name to send. Defaults: 'E. South America Standard Time' (graph_windows, substrate) or the TIMEZONE variable (graph_iana).",
+            ),
+        },
+      },
+      async ({ list, task_id, start, due, mode, zone }): Promise<McpResponse> => {
+        const tz = zone ?? (mode === "graph_iana" ? this.ctx.env.TIMEZONE : "E. South America Standard Time");
+        if (mode === "substrate") {
+          return this.withSubstrate("set_task_times", async (sub) => {
+            const list_id = await this.resolveListForTask(list, task_id);
+            if (!list_id) return errResponse("list_required", { task_id });
+            const body: Record<string, unknown> = {};
+            if (start) body.StartDateTime = { DateTime: `${start}:00.0000000`, TimeZone: tz };
+            if (due) body.DueDateTime = { DateTime: `${due}:00.0000000`, TimeZone: tz };
+            const task = await sub.patchTask(list_id, task_id, body);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    ok: true,
+                    mode,
+                    zone: tz,
+                    sent: body,
+                    start_raw: task.StartDateTime ?? null,
+                    due_raw: task.DueDateTime ?? null,
+                  }),
+                },
+              ],
+            };
+          });
+        }
+        return this.withGraph("set_task_times", async (graph) => {
+          const list_id = await this.resolveList(list);
+          const url = `https://graph.microsoft.com/v1.0/me/todo/lists/${encodeURIComponent(list_id)}/tasks/${encodeURIComponent(task_id)}`;
+          const body: Record<string, unknown> = {};
+          if (start) body.startDateTime = { dateTime: `${start}:00`, timeZone: tz };
+          if (due) body.dueDateTime = { dateTime: `${due}:00`, timeZone: tz };
+          try {
+            const task = await graph.patchJson(url, body, TodoTaskSchema, {});
+            await this.#indexUpsertTask(task, list_id);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    ok: true,
+                    mode,
+                    zone: tz,
+                    sent: body,
+                    start_raw: task.startDateTime ?? null,
+                    due_raw: task.dueDateTime ?? null,
+                  }),
+                },
+              ],
+            };
+          } catch (e) {
+            if (e instanceof GraphError) {
+              return errResponse("graph_error", { status: e.status, detail: e.detail, sent: body });
+            }
+            throw e;
+          }
+        });
+      },
+    );
+
 
     this.#tool(
       "delete_task",
