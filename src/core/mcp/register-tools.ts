@@ -79,9 +79,9 @@ const MY_DAY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // due/start but the full time of reminder, so they convert differently — see
 // util/dates.ts.
 const GRAPH_DATE_KEYS = {
-  due: { key: "dueDateTime", convert: toGraphDate },
+  due: { key: "dueDateTime", convert: (s: string, tz: string) => (/^\d{4}-\d{2}-\d{2}$/.test(s.trim()) ? toGraphDate(s, tz) : toGraphDateTime(s, tz)) },
   reminder: { key: "reminderDateTime", convert: toGraphDateTime },
-  start: { key: "startDateTime", convert: toGraphDate },
+  start: { key: "startDateTime", convert: (s: string, tz: string) => (/^\d{4}-\d{2}-\d{2}$/.test(s.trim()) ? toGraphDate(s, tz) : toGraphDateTime(s, tz)) },
 } as const;
 
 function graphDateFields(
